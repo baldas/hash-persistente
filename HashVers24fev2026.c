@@ -1,26 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* necessary header file - PMDK */
 #include <libpmemobj.h>
-
-/*
- * The comments below the new sentences are the volatile equivalent.
- *
- */
 
 #define MAX_SIZE 5
 #define EMPTY 0
 #define OCUPADO 1
 #define DELETED 2
 
-#define CLEAN 0
-#define DIRTY 1
+#define LAYOUT_NAME "hash"
 
-/* We usually put the root information inside a struct */
-struct my_root {
-  PMEMoid p_Hash;
-};
+POBJ_LAYOUT_BEGIN(hash);
+  POBJ_LAYOUT_ROOT(hash, struct my_root);
+  POBJ_LAYOUT_TOID(hash, struct Hash);
+POBJ_LAYOUT_END(hash);
 
 struct Hash {
   int clean;
@@ -29,28 +22,21 @@ struct Hash {
   int occupied [MAX_SIZE];
 };
 
-typedef struct Hash HASH;
-
-
-#define LAYOUT_NAME "hash"
+struct my_root {
+  TOID(struct Hash) p_Hash;
+};
 
 //funcao para imprimir hash
-void display(PMEMoid p_Hash){
+void display(TOID(struct Hash) p_Hash){
   printf ("Hash = ");
 
   for (int i = 0; i < MAX_SIZE; i++){
-    
-    if (((HASH *)pmemobj_direct(p_Hash))->occupied[i] == OCUPADO){
-      printf ("%d ", ((HASH *)pmemobj_direct(p_Hash))->valor[i]);
-    }
-
-    else{
+    if (D_RO(p_Hash)->occupied[i] == OCUPADO)
+      printf ("%d ", D_RO(p_Hash)->valor[i]);
+    else
       printf ("* ");
-    }
-  
   }
-  
-    printf ("\n");
+  printf ("\n");
 }
 
 //funcao de calculo da posicao do hash
@@ -59,133 +45,122 @@ int funcaoHash (int dado){
 }
 
 //funcao para inicializar hash
-void start_hash(PMEMobjpool *pop, PMEMoid *p_Hash){
+void start_hash(PMEMobjpool *pop, TOID(struct Hash) *p_Hash){
 
-    TX_BEGIN(pop){
-      //TX_ADD(p_Hash); duvida
+  TX_BEGIN(pop){
+    TX_ADD_DIRECT(p_Hash);
 
-      PMEMoid p_newHash = pmemobj_tx_alloc(sizeof(HASH), 1);
+    *p_Hash = TX_NEW(struct Hash);
 
-      ((HASH *)pmemobj_direct(p_newHash))->size = 0;
+    D_RW(*p_Hash)->size = 0;
 
-      for (int i = 0; i < MAX_SIZE; i++){
-        ((HASH *)pmemobj_direct(p_newHash))->valor[i] = -1;
-        ((HASH *)pmemobj_direct(p_newHash))->occupied[i] = EMPTY;
-      }
-
-      *p_Hash = p_newHash;
-
+    for (int i = 0; i < MAX_SIZE; i++){
+      D_RW(*p_Hash)->valor[i] = -1;
+      D_RW(*p_Hash)->occupied[i] = EMPTY;
+    }
   } TX_END
 
 }
 
 //funcao inserir
-void insert (PMEMobjpool *pop, PMEMoid p_aux, int dado){
+void insert (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
 
-  if (((HASH *)pmemobj_direct(p_aux))->size >= MAX_SIZE) {
+  if (D_RO(p_aux)->size >= MAX_SIZE) {
     printf("Hash cheio\n");
     return;
   }
 
-  else{
-      TX_BEGIN(pop) {
+  TX_BEGIN(pop) {
 
-        int posicao = funcaoHash(dado);
+    TX_ADD(p_aux);
 
-        while (((HASH *)pmemobj_direct(p_aux))->occupied[posicao] == OCUPADO){
-          posicao = posicao + 1;
-          posicao = posicao % MAX_SIZE;
-        }
+    int posicao = funcaoHash(dado);
 
-        ((HASH *)pmemobj_direct(p_aux))->valor[posicao] = dado;
-        ((HASH *)pmemobj_direct(p_aux))->occupied[posicao] = OCUPADO;
+    while (D_RO(p_aux)->occupied[posicao] == OCUPADO){
+      posicao++;
+      posicao = posicao % MAX_SIZE;
+    }
 
-        ((HASH *)pmemobj_direct(p_aux))->size++;
-    } TX_END
-  }
+    D_RW(p_aux)->valor[posicao] = dado;
+    D_RW(p_aux)->occupied[posicao] = OCUPADO;
+    D_RW(p_aux)->size++;
+  } TX_END
   
 }
 
 //funcao busca
-void search (PMEMoid p_aux, int dado){
+void search (TOID(struct Hash) p_aux, int dado){
 
-  if (((HASH *)pmemobj_direct(p_aux))->size == 0) {
+  if (D_RO(p_aux)->size == 0) {
     printf("Hash vazio\n");
     return;
-  } else {
+  }
 
-    int posicao = funcaoHash(dado);
+  int posicao = funcaoHash(dado);
 
-    for (int i = 0; i<MAX_SIZE && ((HASH *)pmemobj_direct(p_aux))->occupied[posicao] != EMPTY; i++){
-        
-      if (((HASH *)pmemobj_direct(p_aux))->valor[posicao]==dado && ((HASH *)pmemobj_direct(p_aux))->occupied[posicao]==OCUPADO){
-        printf ("Valor encontrado na posicao %d\n", posicao);
-        return;
-      }
-        
-      posicao = posicao + 1;
-      posicao = posicao % MAX_SIZE;
+  for (int i = 0; i<MAX_SIZE && D_RO(p_aux)->occupied[posicao] != EMPTY; i++){
+      
+    if (D_RO(p_aux)->valor[posicao]==dado && D_RO(p_aux)->occupied[posicao]==OCUPADO){
+      printf ("Valor encontrado na posicao %d\n", posicao);
+      return;
     }
-  } 
+
+    posicao++;
+    posicao = posicao % MAX_SIZE;
+  }
+
   printf("Valor não encontrado\n");
 }
 
-void remove_position (PMEMobjpool *pop, PMEMoid p_aux, int posicao){
-  if (((HASH *)pmemobj_direct(p_aux))->size == 0) {
+void remove_position (PMEMobjpool *pop, TOID(struct Hash) p_aux, int posicao){
+
+  if (D_RO(p_aux)->size == 0) {
     printf("Hash vazio\n");
     return;
-  } else if (((HASH *)pmemobj_direct(p_aux))->occupied[posicao] != OCUPADO){
+  }
+
+  if (D_RO(p_aux)->occupied[posicao] != OCUPADO){
     printf("Posicao vazia\n");
-  } else{
-      TX_BEGIN(pop) {
-        
-        ((HASH *)pmemobj_direct(p_aux))->occupied[posicao] = DELETED;
-        ((HASH *)pmemobj_direct(p_aux))->size--;
-    
-      } TX_END
-  }  
+  } else {
+    TX_BEGIN(pop) {
+      TX_ADD(p_aux);
+      D_RW(p_aux)->occupied[posicao] = DELETED;
+      D_RW(p_aux)->size--;
+    } TX_END
+  } 
 }
 
-void remove_value (PMEMobjpool *pop, PMEMoid p_aux, int dado){
+void remove_value (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
 
   int flag = 0;
   
-  if (((HASH *)pmemobj_direct(p_aux))->size == 0) {
+  if (D_RO(p_aux)->size == 0) {
     printf("Hash vazio\n");
     return;
-  } else{
-      TX_BEGIN(pop) {
-        int i;
-        int posicao = funcaoHash(dado);
+  }
 
-        for (i = 0; i<MAX_SIZE && ((HASH *)pmemobj_direct(p_aux))->occupied[posicao] != EMPTY; i++){          
-          if (((HASH *)pmemobj_direct(p_aux))->valor[posicao]==dado && ((HASH *)pmemobj_direct(p_aux))->occupied[posicao] != DELETED){
-            ((HASH *)pmemobj_direct(p_aux))->occupied[posicao] = DELETED;
-            ((HASH *)pmemobj_direct(p_aux))->size--;
-            flag = 1;
-          }
-          posicao = posicao + 1;
-          posicao = posicao % MAX_SIZE;      
-        }
-      } TX_END
+  int i;
+  int posicao = funcaoHash(dado);
+  
+  TX_BEGIN(pop) {
 
-      if (flag == 0){
-        printf("Valor nao encontrado\n");
+    TX_ADD(p_aux);
+
+    for (i = 0; i<MAX_SIZE && D_RO(p_aux)->occupied[posicao] != EMPTY; i++){          
+      if (D_RO(p_aux)->valor[posicao]==dado && D_RO(p_aux)->occupied[posicao] != DELETED){
+        D_RW(p_aux)->occupied[posicao] = DELETED;
+        D_RW(p_aux)->size--;
+        flag = 1;
       }
-  }  
-}
-
-int verifica_null(PMEMoid p_aux){
-
-    HASH *h = pmemobj_direct(p_aux);
-
-    if (h == NULL) {
-      return CLEAN;
-    } else {
-      return DIRTY;
+      posicao++;
+      posicao = posicao % MAX_SIZE;      
     }
-}
+  } TX_END
 
+  if (flag == 0){
+    printf("Valor nao encontrado\n");
+  } 
+}
 
 int main(int argc, char *argv[]) {
 /****
@@ -205,9 +180,12 @@ int main(int argc, char *argv[]) {
 /* Get a "conventional" pointer to the root object */  
   struct my_root *root = pmemobj_direct(p_root);
 
-  if (verifica_null(root->p_Hash)==CLEAN){
-    start_hash(pop, &root->p_Hash);
-  }
+  TX_BEGIN(pop) {
+    if (OID_IS_NULL(root->p_Hash)){
+      TX_ADD_DIRECT(&root->p_Hash);
+      start_hash(pop, &root->p_Hash);
+    }
+  } TX_END
 
   int option = 0;
   int dado;
@@ -264,8 +242,3 @@ int main(int argc, char *argv[]) {
   return 0;
   
 }
-
-//duvida persistencia ponteiros apos funcoes
-//https://pmem.io/pmdk/manpages/linux/v1.3/libpmemobj.3/#layout-declaration-1
-//https://github.com/pmem/libpmemobj-cpp/tree/master/utils
-//https://github.com/pmem/pmdk
