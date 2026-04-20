@@ -181,7 +181,7 @@ int main(int argc, char *argv[]) {
   struct my_root *root = pmemobj_direct(p_root);
 
   TX_BEGIN(pop) {
-    if (OID_IS_NULL(root->p_Hash)){
+    if (TOID_IS_NULL(root->p_Hash)){
       TX_ADD_DIRECT(&root->p_Hash);
       start_hash(pop, &root->p_Hash);
     }
