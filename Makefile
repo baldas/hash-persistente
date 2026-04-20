@@ -4,7 +4,7 @@
 
 LDFLAGS = -lpmemobj
 
-BINS = HashVers24fev2026
+BINS = hash_persistente
 
 LINKER=$(CC)
 
@@ -15,7 +15,7 @@ CFLAGS=-std=gnu99
 
 all:	$(BINS)
 
-HashVers24fev2026.o: HashVers24fev2026.c
+hash_persistente.o: hash_persistente.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BINS):	%:	%.o 
