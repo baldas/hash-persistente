@@ -54,6 +54,10 @@ void start_hash(PMEMobjpool *pop, TOID(struct Hash) *p_Hash){
 
     D_RW(*p_Hash)->size = 0;
 
+    #ifdef SIMULATE_CRASH
+      exit(0)
+    #endif
+
     for (int i = 0; i < MAX_SIZE; i++){
       D_RW(*p_Hash)->valor[i] = -1;
       D_RW(*p_Hash)->occupied[i] = EMPTY;
@@ -80,6 +84,10 @@ void insert (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
       posicao++;
       posicao = posicao % MAX_SIZE;
     }
+
+    #ifdef SIMULATE_CRASH
+      exit(0)
+    #endif
 
     D_RW(p_aux)->valor[posicao] = dado;
     D_RW(p_aux)->occupied[posicao] = OCUPADO;
@@ -125,6 +133,9 @@ void remove_position (PMEMobjpool *pop, TOID(struct Hash) p_aux, int posicao){
     TX_BEGIN(pop) {
       TX_ADD(p_aux);
       D_RW(p_aux)->occupied[posicao] = DELETED;
+      #ifdef SIMULATE_CRASH
+        exit(0)
+      #endif
       D_RW(p_aux)->size--;
     } TX_END
   } 
@@ -149,6 +160,9 @@ void remove_value (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
     for (i = 0; i<MAX_SIZE && D_RO(p_aux)->occupied[posicao] != EMPTY; i++){          
       if (D_RO(p_aux)->valor[posicao]==dado && D_RO(p_aux)->occupied[posicao] != DELETED){
         D_RW(p_aux)->occupied[posicao] = DELETED;
+        #ifdef SIMULATE_CRASH
+          exit(0)
+        #endif
         D_RW(p_aux)->size--;
         flag = 1;
       }
@@ -183,6 +197,9 @@ int main(int argc, char *argv[]) {
   TX_BEGIN(pop) {
     if (TOID_IS_NULL(root->p_Hash)){
       TX_ADD_DIRECT(&root->p_Hash);
+      #ifdef SIMULATE_CRASH
+        exit(0)
+      #endif
       start_hash(pop, &root->p_Hash);
     }
   } TX_END
