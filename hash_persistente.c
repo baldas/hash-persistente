@@ -3,12 +3,16 @@
 
 #include <libpmemobj.h>
 
-#define MAX_SIZE 5
+#define MAX_SIZE 16
 #define EMPTY 0
 #define OCUPADO 1
 #define DELETED 2
 
+int lifetime = -1;
+
 #define LAYOUT_NAME "hash"
+#define POOL_SIZE ((size_t) (1 * 1024))
+#define POOL_NAME "hash_pool.obj"
 
 POBJ_LAYOUT_BEGIN(hash);
   POBJ_LAYOUT_ROOT(hash, struct my_root);
@@ -54,9 +58,9 @@ void start_hash(PMEMobjpool *pop, TOID(struct Hash) *p_Hash){
 
     D_RW(*p_Hash)->size = 0;
 
-    #ifdef SIMULATE_CRASH
-      exit(0)
-    #endif
+    if (lifetime == 0)
+      exit(0);
+    lifetime--;
 
     for (int i = 0; i < MAX_SIZE; i++){
       D_RW(*p_Hash)->valor[i] = -1;
@@ -85,9 +89,9 @@ void insert (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
       posicao = posicao % MAX_SIZE;
     }
 
-    #ifdef SIMULATE_CRASH
-      exit(0)
-    #endif
+    if (lifetime == 0)
+      exit(0);
+    lifetime--;
 
     D_RW(p_aux)->valor[posicao] = dado;
     D_RW(p_aux)->occupied[posicao] = OCUPADO;
@@ -133,9 +137,9 @@ void remove_position (PMEMobjpool *pop, TOID(struct Hash) p_aux, int posicao){
     TX_BEGIN(pop) {
       TX_ADD(p_aux);
       D_RW(p_aux)->occupied[posicao] = DELETED;
-      #ifdef SIMULATE_CRASH
-        exit(0)
-      #endif
+      if (lifetime == 0)
+        exit(0);
+      lifetime--;
       D_RW(p_aux)->size--;
     } TX_END
   } 
@@ -160,9 +164,9 @@ void remove_value (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
     for (i = 0; i<MAX_SIZE && D_RO(p_aux)->occupied[posicao] != EMPTY; i++){          
       if (D_RO(p_aux)->valor[posicao]==dado && D_RO(p_aux)->occupied[posicao] != DELETED){
         D_RW(p_aux)->occupied[posicao] = DELETED;
-        #ifdef SIMULATE_CRASH
-          exit(0)
-        #endif
+        if (lifetime == 0)
+          exit(0);
+        lifetime--;
         D_RW(p_aux)->size--;
         flag = 1;
       }
@@ -181,12 +185,20 @@ int main(int argc, char *argv[]) {
  * POOL MANEGEMENT CODE
  */
 
-/* Open the pool and return a "pool object pointer" */
-  PMEMobjpool *pop = pmemobj_open(argv[1], LAYOUT_NAME);
-	if (pop == NULL) {
-    perror("pmemobj_open");
-    return 1;
+  if (argc > 1) {
+    lifetime = atoi(argv[1]);
   }
+
+  PMEMobjpool *pop = pmemobj_create(POOL_NAME, LAYOUT_NAME, POOL_SIZE, 0666);
+  if (pop == NULL) {
+    /* Open the pool and return a "pool object pointer" */
+      pop = pmemobj_open(POOL_NAME, LAYOUT_NAME);
+      if (pop == NULL) {
+        perror("pmemobj_open");
+        return 1;
+      }
+  }
+
 
 /* Retrieve a persistent pointer to the root object */  
   PMEMoid p_root = pmemobj_root(pop, sizeof(struct my_root));
@@ -197,9 +209,9 @@ int main(int argc, char *argv[]) {
   TX_BEGIN(pop) {
     if (TOID_IS_NULL(root->p_Hash)){
       TX_ADD_DIRECT(&root->p_Hash);
-      #ifdef SIMULATE_CRASH
-        exit(0)
-      #endif
+      if (lifetime == 0)
+        exit(0);
+      lifetime--;
       start_hash(pop, &root->p_Hash);
     }
   } TX_END

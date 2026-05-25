@@ -21,10 +21,10 @@ hash_persistente.o: hash_persistente.c
 $(BINS):	%:	%.o 
 	$(LINKER) -o $@ $< $(LDFLAGS)
 
-debbug: hash_persistente.o
-	$(LINKER) -o $@ $< $(LDFLAGS) -DSIMULATE_CRASH
-
 clean:
+	rm -f *.o
+
+veryclean:
 	rm -f $(BINS) *.o
 
 
