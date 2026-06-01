@@ -15,6 +15,12 @@ CFLAGS=-std=gnu99
 
 all:	$(BINS)
 
+execute: veryclean $(BINS)
+	./$(BINS)
+
+test: veryclean $(BINS)
+	./$(BINS) 10
+
 hash_persistente.o: hash_persistente.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 

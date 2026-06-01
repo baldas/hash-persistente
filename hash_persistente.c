@@ -1,183 +1,307 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #include <libpmemobj.h>
 
-#define MAX_SIZE 16
-#define EMPTY 0
-#define OCUPADO 1
-#define DELETED 2
 
-int lifetime = -1;
+#define EMPTY 0.0
+#define FULL 1.0
+#define false 0
+#define true 1
 
-#define LAYOUT_NAME "hash"
-#define POOL_SIZE ((size_t) (1 * 1024))
+#define BUFFER_SIZE 64
+#define DEFAULT INT_MIN
+
+#define INITIAL_SIZE 8
+#define SIZE_RATE 2
+#define EXPAND_RATE 0.75
+#define REDUCTION_RATE (EXPAND_RATE / SIZE_RATE)
+
+int lifetime = DEFAULT;
+
+#define LAYOUT_NAME "HASH"
+#define POOL_SIZE ((size_t) (10 * 1024 * 1024)) //10 MB
 #define POOL_NAME "hash_pool.obj"
 
-POBJ_LAYOUT_BEGIN(hash);
-  POBJ_LAYOUT_ROOT(hash, struct my_root);
-  POBJ_LAYOUT_TOID(hash, struct Hash);
-POBJ_LAYOUT_END(hash);
+POBJ_LAYOUT_BEGIN(HASH);
+  POBJ_LAYOUT_ROOT(HASH, struct my_root);
+  POBJ_LAYOUT_TOID(HASH, int);
+  POBJ_LAYOUT_TOID(HASH, char);
+  POBJ_LAYOUT_TOID(HASH, struct hash);
+POBJ_LAYOUT_END(HASH);
 
-struct Hash {
-  int clean;
+struct hash {
   int size;
-  int valor [MAX_SIZE];
-  int occupied [MAX_SIZE];
+  int max_size;
+  TOID(int) data;
+  TOID(char) occupied;
 };
 
 struct my_root {
-  TOID(struct Hash) p_Hash;
+  TOID(struct hash) p_hash;
 };
 
-//funcao para imprimir hash
-void display(TOID(struct Hash) p_Hash){
-  printf ("Hash = ");
+// Imprime o hash na tela, para monitoramento do usuário
+void display(TOID(struct hash) p_aux) {
 
-  for (int i = 0; i < MAX_SIZE; i++){
-    if (D_RO(p_Hash)->occupied[i] == OCUPADO)
-      printf ("%d ", D_RO(p_Hash)->valor[i]);
+  // Percorre as linhas de 8 itens do hash
+  for (int i = 0; i < (D_RO(p_aux)->max_size / INITIAL_SIZE); i++) {
+
+    // Caso seja a primeira linha, imprime o cabeçalho do hash
+    if (i != 0)
+      printf("       ");
     else
-      printf ("* ");
+      printf("\n HASH =");
+
+    // Percorre os itens do hash daquela linha
+    for (int j = 0; j < INITIAL_SIZE; j++) {
+
+      // Se tiver um conteúdo naquele espaço, verifica se está ocupado
+      if (D_RO(D_RO(p_aux)->data)[i*INITIAL_SIZE+j] != DEFAULT) {
+
+        // Caso não esteja ocupado, usa a flag de remoção na resposta
+        if (D_RO(D_RO(p_aux)->occupied)[i*INITIAL_SIZE+j])
+            printf(" [%d] ", D_RO(D_RO(p_aux)->data)[i*INITIAL_SIZE+j]);
+        else
+            printf(" [!%d] ", D_RO(D_RO(p_aux)->data)[i*INITIAL_SIZE+j]);
+
+      } else
+        printf(" [*] ");
+    }
+
+    printf(" (%d)\n", (i+1)*INITIAL_SIZE);
   }
-  printf ("\n");
 }
 
-//funcao de calculo da posicao do hash
-int funcaoHash (int dado){
-  return (dado*dado) % MAX_SIZE;
+// Pode ser trocada por qualquer função de espalhamento (hash)
+int hash_function(int dado, int max_size) {
+  int res = (dado * dado) % max_size;
+  return res < 0 ? res + max_size : res; //Caso dê overflow, mantém o valor por meio da rotação no hash
+}
+
+// Taxa de ocupação do Hash
+double hash_rate(TOID(struct hash) p_aux) {
+  return (((double) D_RO(p_aux)->size) / ((double) D_RO(p_aux)->max_size)) * FULL;
 }
 
 //funcao para inicializar hash
-void start_hash(PMEMobjpool *pop, TOID(struct Hash) *p_Hash){
+void start_hash(PMEMobjpool *pop, TOID(struct hash) *p_hash){
 
   TX_BEGIN(pop){
-    TX_ADD_DIRECT(p_Hash);
+    TX_ADD_DIRECT(p_hash);
 
-    *p_Hash = TX_NEW(struct Hash);
+    *p_hash = TX_NEW(struct hash);
 
-    D_RW(*p_Hash)->size = 0;
+    D_RW(*p_hash)->size = 0;
+    D_RW(*p_hash)->max_size = INITIAL_SIZE;
 
-    if (lifetime == 0)
-      exit(0);
-    lifetime--;
+    if (lifetime != DEFAULT) {
+      if (lifetime == 0)
+        exit(0);
+      lifetime--;
+    }
 
-    for (int i = 0; i < MAX_SIZE; i++){
-      D_RW(*p_Hash)->valor[i] = -1;
-      D_RW(*p_Hash)->occupied[i] = EMPTY;
+    D_RW(*p_hash)->data = TX_ALLOC(int, sizeof(int) * D_RO(*p_hash)->max_size);
+    D_RW(*p_hash)->occupied = TX_ALLOC(char, sizeof(char) * D_RO(*p_hash)->max_size);
+
+    for (int i = 0; i < D_RO(*p_hash)->max_size; i++){
+      D_RW(D_RW(*p_hash)->data)[i] = DEFAULT;
+      D_RW(D_RW(*p_hash)->occupied)[i] = false;
     }
   } TX_END
 
 }
 
 //funcao inserir
-void insert (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
+char insert (PMEMobjpool *pop, TOID(struct hash) p_aux, int dado){
 
-  if (D_RO(p_aux)->size >= MAX_SIZE) {
-    printf("Hash cheio\n");
-    return;
+  if (hash_rate(p_aux) >= FULL) {
+    printf("Hash cheio.\n");
+    return false;
   }
 
   TX_BEGIN(pop) {
 
     TX_ADD(p_aux);
+    pmemobj_tx_add_range_direct(D_RW(D_RW(p_aux)->data), sizeof(int) * D_RO(p_aux)->max_size);
+    pmemobj_tx_add_range_direct(D_RW(D_RW(p_aux)->occupied), sizeof(char) * D_RO(p_aux)->max_size);
 
-    int posicao = funcaoHash(dado);
+    int posicao = hash_function(dado, D_RO(p_aux)->max_size);
 
-    while (D_RO(p_aux)->occupied[posicao] == OCUPADO){
+    while (D_RO(D_RO(p_aux)->occupied)[posicao]){
       posicao++;
-      posicao = posicao % MAX_SIZE;
+      posicao = posicao % D_RO(p_aux)->max_size;
     }
 
-    if (lifetime == 0)
-      exit(0);
-    lifetime--;
-
-    D_RW(p_aux)->valor[posicao] = dado;
-    D_RW(p_aux)->occupied[posicao] = OCUPADO;
-    D_RW(p_aux)->size++;
-  } TX_END
-  
-}
-
-//funcao busca
-void search (TOID(struct Hash) p_aux, int dado){
-
-  if (D_RO(p_aux)->size == 0) {
-    printf("Hash vazio\n");
-    return;
-  }
-
-  int posicao = funcaoHash(dado);
-
-  for (int i = 0; i<MAX_SIZE && D_RO(p_aux)->occupied[posicao] != EMPTY; i++){
-      
-    if (D_RO(p_aux)->valor[posicao]==dado && D_RO(p_aux)->occupied[posicao]==OCUPADO){
-      printf ("Valor encontrado na posicao %d\n", posicao);
-      return;
-    }
-
-    posicao++;
-    posicao = posicao % MAX_SIZE;
-  }
-
-  printf("Valor não encontrado\n");
-}
-
-void remove_position (PMEMobjpool *pop, TOID(struct Hash) p_aux, int posicao){
-
-  if (D_RO(p_aux)->size == 0) {
-    printf("Hash vazio\n");
-    return;
-  }
-
-  if (D_RO(p_aux)->occupied[posicao] != OCUPADO){
-    printf("Posicao vazia\n");
-  } else {
-    TX_BEGIN(pop) {
-      TX_ADD(p_aux);
-      D_RW(p_aux)->occupied[posicao] = DELETED;
+    if (lifetime != DEFAULT) {
       if (lifetime == 0)
         exit(0);
       lifetime--;
-      D_RW(p_aux)->size--;
-    } TX_END
-  } 
+    }
+
+    D_RW(D_RW(p_aux)->data)[posicao] = dado;
+    D_RW(D_RW(p_aux)->occupied)[posicao] = true;
+    D_RW(p_aux)->size++;
+  } TX_END
+
+  return true;
 }
 
-void remove_value (PMEMobjpool *pop, TOID(struct Hash) p_aux, int dado){
+//funcao busca
+int search_value (TOID(struct hash) p_aux, int dado){
 
-  int flag = 0;
-  
-  if (D_RO(p_aux)->size == 0) {
-    printf("Hash vazio\n");
-    return;
+  if (hash_rate(p_aux) <= EMPTY) {
+    printf("Hash vazio.\n");
+    return DEFAULT;
   }
 
-  int i;
-  int posicao = funcaoHash(dado);
+  int posicao = hash_function(dado, D_RO(p_aux)->max_size);
+
+  for (int i = 0; D_RO(D_RO(p_aux)->data)[posicao] != DEFAULT; i++){
+      
+    if (D_RO(D_RO(p_aux)->data)[posicao] == dado && D_RO(D_RO(p_aux)->occupied)[posicao]){
+      return posicao;
+    }
+
+    posicao++;
+    posicao = posicao % D_RO(p_aux)->max_size;
+
+    if (posicao == hash_function(dado, D_RO(p_aux)->max_size))
+      break;
+  }
+
+  return DEFAULT;
+}
+
+char remove_position (PMEMobjpool *pop, TOID(struct hash) p_aux, int posicao){
+
+  if (hash_rate(p_aux) <= EMPTY) {
+    printf("Hash vazio.\n");
+    return false;
+  }
+
+  if (posicao < 1 || posicao > D_RO(p_aux)->max_size){
+    printf("Posição invalida.\n");
+    return false;
+  }
+
+  posicao--;
+
+  if (! D_RO(D_RO(p_aux)->occupied)[posicao]){
+    printf("Posição vazia.\n");
+    return false;
+  }
+  
+
+  TX_BEGIN(pop) {
+    TX_ADD(p_aux);
+    pmemobj_tx_add_range_direct(D_RW(D_RW(p_aux)->occupied), sizeof(char) * D_RO(p_aux)->max_size);
+    D_RW(D_RW(p_aux)->occupied)[posicao] = false;
+
+    if (lifetime != DEFAULT) {
+      if (lifetime == 0)
+        exit(0);
+      lifetime--;
+    }
+
+    D_RW(p_aux)->size--;
+  } TX_END
+
+  return true;
+}
+
+char remove_value (PMEMobjpool *pop, TOID(struct hash) p_aux, int dado){
+
+  char removed = false;
+  
+  if (hash_rate(p_aux) <= EMPTY) {
+    printf("Hash vazio.\n");
+    return removed;
+  }
   
   TX_BEGIN(pop) {
 
     TX_ADD(p_aux);
+    pmemobj_tx_add_range_direct(D_RW(D_RW(p_aux)->occupied), sizeof(char) * D_RO(p_aux)->max_size);
 
-    for (i = 0; i<MAX_SIZE && D_RO(p_aux)->occupied[posicao] != EMPTY; i++){          
-      if (D_RO(p_aux)->valor[posicao]==dado && D_RO(p_aux)->occupied[posicao] != DELETED){
-        D_RW(p_aux)->occupied[posicao] = DELETED;
-        if (lifetime == 0)
-          exit(0);
-        lifetime--;
+    int posicao = hash_function(dado, D_RO(p_aux)->max_size);
+    while (D_RO(D_RO(p_aux)->data)[posicao] != DEFAULT){
+
+      if (D_RO(D_RO(p_aux)->data)[posicao] == dado && D_RO(D_RO(p_aux)->occupied)[posicao]){
+        D_RW(D_RW(p_aux)->occupied)[posicao] = false;
+
+        if (lifetime != DEFAULT) {
+          if (lifetime == 0)
+            exit(0);
+          lifetime--;
+        }
+
         D_RW(p_aux)->size--;
-        flag = 1;
+        removed = true;
       }
       posicao++;
-      posicao = posicao % MAX_SIZE;      
+      posicao = posicao % D_RO(p_aux)->max_size;
+      
+      if (posicao == hash_function(dado, D_RO(p_aux)->max_size))
+        break;
     }
   } TX_END
 
-  if (flag == 0){
-    printf("Valor nao encontrado\n");
-  } 
+  return removed;
+}
+
+char restore_position (PMEMobjpool *pop, TOID(struct hash) p_aux, int posicao){
+
+  if (posicao < 1 || posicao > D_RO(p_aux)->max_size){
+    printf("Posição invalida.\n");
+    return false;
+  }
+
+  posicao--;
+
+  if (D_RO(D_RO(p_aux)->data)[posicao] == DEFAULT){
+    printf("Posição vazia.\n");
+    return false;
+  }
+  
+
+  TX_BEGIN(pop) {
+    TX_ADD(p_aux);
+    pmemobj_tx_add_range_direct(D_RW(D_RW(p_aux)->occupied), sizeof(char) * D_RO(p_aux)->max_size);
+    D_RW(D_RW(p_aux)->occupied)[posicao] = true;
+
+    if (lifetime != DEFAULT) {
+      if (lifetime == 0)
+        exit(0);
+      lifetime--;
+    }
+
+    D_RW(p_aux)->size++;
+  } TX_END
+
+  return true;
+}
+
+void reset_hash(PMEMobjpool *pop, struct my_root * root) {
+
+  TX_BEGIN (pop) {
+
+    TX_FREE(D_RW(root->p_hash)->occupied);
+    TX_FREE(D_RW(root->p_hash)->data);
+
+    if (lifetime != DEFAULT) {
+      if (lifetime == 0)
+        exit(0);
+      lifetime--;
+    }
+  
+    TX_FREE(root->p_hash);
+    root->p_hash = TOID_NULL(struct hash);
+    start_hash(pop, &root->p_hash);
+
+  } TX_END
+
 }
 
 int main(int argc, char *argv[]) {
@@ -194,79 +318,117 @@ int main(int argc, char *argv[]) {
     /* Open the pool and return a "pool object pointer" */
       pop = pmemobj_open(POOL_NAME, LAYOUT_NAME);
       if (pop == NULL) {
-        perror("pmemobj_open");
+        perror("pmemobj_open\n");
         return 1;
       }
   }
 
-
-/* Retrieve a persistent pointer to the root object */  
-  PMEMoid p_root = pmemobj_root(pop, sizeof(struct my_root));
-
 /* Get a "conventional" pointer to the root object */  
-  struct my_root *root = pmemobj_direct(p_root);
+  struct my_root *root = D_RW(POBJ_ROOT(pop, struct my_root));
 
-  TX_BEGIN(pop) {
-    if (TOID_IS_NULL(root->p_Hash)){
-      TX_ADD_DIRECT(&root->p_Hash);
-      if (lifetime == 0)
-        exit(0);
-      lifetime--;
-      start_hash(pop, &root->p_Hash);
-    }
-  } TX_END
-
-  int option = 0;
-  int dado;
-
-  while (1){
-
-    printf("\n\n");
-    display(root->p_Hash);
-
-    printf("Enter your choice:\n1. Insert\n2. Search by value\n3. Remove by position \n4. Remove by value\n5. Exit\n >> ");
-
-    scanf("%d", &option);
-
-    if (option < 1 || option > 6){
-      
-      printf("Valor invalido\n");
-    
-    } else if (option == 1) {
-			
-      printf("Enter data to be inserted: ");
-      scanf("%d", &dado);
-			insert(pop, root->p_Hash, dado);
-      
-	  } else if (option == 2) {
-     
-      printf("Enter value to be searched: ");
-      scanf("%d", &dado);
-      search(root->p_Hash, dado);
-    
-    } else if (option == 3) {
-        
-      printf("Enter position to be removed: ");
-      scanf("%d", &dado);
-
-      if (dado>=0 && dado<MAX_SIZE){
-        remove_position(pop, root->p_Hash, dado);
-      } else{
-        printf ("Posicao invalida\n");
-      }
-      
-    } else if (option == 4) {
-        
-      printf("Enter value to be removed: ");
-      scanf("%d", &dado);
-      remove_value(pop, root->p_Hash, dado);
-
-    } else if (option == 5) {
-        break;
-    }
-  
+  if (TOID_IS_NULL(root->p_hash)){
+    start_hash(pop, &root->p_hash);
   }
-  
+
+  int option, data;
+  char buffer[BUFFER_SIZE];
+
+    // Menu de interação
+  while (true) {
+    display(root->p_hash);
+
+    if (lifetime <0) {
+      printf("\nEnter your choice:\n1. Insert data\n2. Remove by position\n3. Remove by value\n4. Search by value\n5. Restore by position\n6. Reset Hash\n7. Exit\n >> ");
+    } else {
+      printf("\nEnter your choice: (");
+      switch (lifetime) {
+        case 0: printf("- - -"); break;
+        case 1: printf("█ - -"); break;
+        case 2: printf("█ █ -"); break;
+        case 3: printf("█ █ █"); break;
+        default: printf("%dx █",lifetime);
+      }
+      printf(")\n1. Insert data\n2. Remove by position\n3. Remove by value\n4. Search by value\n5. Restore by position\n6. Reset Hash\n7. Exit\n >> ");
+    }
+    fgets(buffer, BUFFER_SIZE-1, stdin);
+    option = atoi(buffer);
+
+    // Alterna entre as possíveis opções do menu
+    switch (option) {
+
+      case 1: // Caso da inserção
+        printf("Enter data to be inserted: ");
+        fgets(buffer, BUFFER_SIZE-1, stdin);
+        data = atoi(buffer);
+
+        if (insert(pop, root->p_hash, data)) {
+          printf("Data inserted!\n");
+        } else {
+          printf("Data not inserted.\n");
+        }
+        break;
+
+      case 2: // Caso da remoção posicional
+        printf("Enter position to be removed: ");
+        fgets(buffer, BUFFER_SIZE-1, stdin);
+        data = atoi(buffer);
+
+        if (remove_position(pop, root->p_hash, data)) {
+          printf("Position removed!\n");
+        } else {
+          printf("Position not removed.\n");
+        }
+        break;
+
+      case 3: // Caso da remoção de itens
+        printf("Enter value to be removed: ");
+        fgets(buffer, BUFFER_SIZE-1, stdin);
+        data = atoi(buffer);
+
+        if (remove_value(pop, root->p_hash, data)) {
+          printf("Data removed!\n");
+        } else {
+          printf("Data not removed.\n");
+        }
+        break;
+
+      case 4: // Caso da busca (para ver se há um dado item)
+        printf("Enter value to be searched: ");
+        fgets(buffer, BUFFER_SIZE-1, stdin);
+        data = atoi(buffer);
+
+        if ((data = search_value(root->p_hash, data)) >= 0) {
+          printf("Data found at position %d.\n", data+1);
+        } else {
+          printf("No data found.\n");
+        }
+        break;
+
+      case 5: // Caso de restauração de itens recém-deletados
+        printf("Enter position to be restored: ");
+        fgets(buffer, BUFFER_SIZE-1, stdin);
+        data = atoi(buffer);
+
+        if (restore_position(pop, root->p_hash, data)) {
+          printf("Position restored!\n");
+        } else {
+          printf("Position not restored.\n");
+        }
+        break;
+
+      case 6: // Caso de reset da hash
+        reset_hash(pop, root);
+        printf("Hash reseted!\n");
+        break;
+
+      case 7: // Caso de saída do programa
+        pmemobj_close(pop);
+        exit(0);
+      
+      default:
+        printf("No command found.\n");
+    }
+  }
   pmemobj_close(pop);
   return 0;
   
