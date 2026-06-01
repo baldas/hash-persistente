@@ -76,7 +76,7 @@ void display(TOID(struct hash) p_aux) {
 
 // Pode ser trocada por qualquer função de espalhamento (hash)
 int hash_function(int dado, int max_size) {
-  int res = (dado * dado) % max_size;
+  int res = (int) (((long long) dado * dado) % max_size);
   return res < 0 ? res + max_size : res; //Caso dê overflow, mantém o valor por meio da rotação no hash
 }
 
@@ -113,6 +113,117 @@ void start_hash(PMEMobjpool *pop, TOID(struct hash) *p_hash){
 
 }
 
+// Expande a hash quando a taxa de ocupação chega na esperada
+void expand_hash(PMEMobjpool *pop, TOID(struct hash) p_aux) {
+
+  if (!TOID_IS_NULL(p_aux) && (hash_rate(p_aux) >= EXPAND_RATE)) {
+
+    int old_size = D_RO(p_aux)->max_size;
+    int new_size = D_RO(p_aux)->max_size * SIZE_RATE;
+
+    TX_BEGIN(pop) {
+
+      TX_ADD(p_aux);
+
+      // Alocando o espaço para o tamanho expandido
+      TOID(int) new_data = TX_ALLOC(int, sizeof(int) * new_size);
+      TOID(char) new_occupied = TX_ZALLOC(char, sizeof(char) * new_size);
+
+      if (!TOID_IS_NULL(new_data)) {
+        // Inicializa cada posição com o valor numérico desejado
+        for (int i = 0; i < new_size; i++) {
+          D_RW(new_data)[i] = DEFAULT; // ou 0, ou qualquer outro número
+        }
+      }
+  
+      // Checando se as alocações de memória deram certo
+      if (!TOID_IS_NULL(new_data) && !TOID_IS_NULL(new_occupied)) {
+  
+        for (int position = 0; position < D_RO(p_aux)->max_size; position++) {
+  
+          // Passando o dado para o novo hash
+          if (D_RO(D_RO(p_aux)->occupied)[position]) {
+            int new_position = hash_function(D_RO(D_RO(p_aux)->data)[position],new_size);
+  
+            while(D_RO(new_occupied)[new_position]) {
+              new_position++;
+              new_position = new_position % new_size;
+              if (new_position == hash_function(D_RO(D_RO(p_aux)->data)[position],new_size))
+                break;
+            }
+            D_RW(new_data)[new_position] = D_RO(D_RO(p_aux)->data)[position];
+            D_RW(new_occupied)[new_position] = true;
+          }
+  
+        }
+  
+        // Limpando as antigas alocações e inserindo as novas na hash atual
+        TX_FREE(D_RW(p_aux)->data);
+        TX_FREE(D_RW(p_aux)->occupied);
+  
+        D_RW(p_aux)->max_size = new_size;
+        D_RW(p_aux)->data = new_data;
+        D_RW(p_aux)->occupied = new_occupied;
+      }
+    } TX_END
+  }
+}
+
+// Reduz o hash para não ocupar muito espaço (caso haja poucos dados em uso)
+void reduce_hash(PMEMobjpool *pop, TOID(struct hash) p_aux) {
+
+  if (!TOID_IS_NULL(p_aux) && (hash_rate(p_aux) < REDUCTION_RATE) && (D_RO(p_aux)->max_size > INITIAL_SIZE)) {
+
+    int old_size = D_RO(p_aux)->max_size;
+    int new_size = D_RO(p_aux)->max_size / SIZE_RATE;
+
+    TX_BEGIN(pop) {
+      
+      TX_ADD(p_aux);
+  
+      // Alocando o espaço para o tamanho expandido
+      TOID(int) new_data = TX_ALLOC(int, sizeof(int) * new_size);
+      TOID(char) new_occupied = TX_ZALLOC(char, sizeof(char) * new_size);
+
+      if (!TOID_IS_NULL(new_data)) {
+        // Inicializa cada posição com o valor numérico desejado
+        for (int i = 0; i < new_size; i++) {
+          D_RW(new_data)[i] = DEFAULT; // ou 0, ou qualquer outro número
+        }
+      }
+
+      // Checando se as alocações de memória deram certo
+      if (!TOID_IS_NULL(new_data) && !TOID_IS_NULL(new_occupied)) {
+  
+        for (int position = 0; position < D_RO(p_aux)->max_size; position++) {
+  
+          // Passando o dado para o novo hash
+          if (D_RO(D_RO(p_aux)->occupied)[position]) {
+            int new_position = hash_function(D_RO(D_RO(p_aux)->data)[position],new_size);
+  
+            while(D_RO(new_occupied)[new_position]) {
+              new_position++;
+              new_position = new_position % new_size;
+              if (new_position == hash_function(D_RO(D_RO(p_aux)->data)[position],new_size))
+                break;
+            }
+            D_RW(new_data)[new_position] = D_RO(D_RO(p_aux)->data)[position];
+            D_RW(new_occupied)[new_position] = true;
+          }
+        }
+        
+        // Limpando as antigas alocações e inserindo as novas na hash atual
+        TX_FREE(D_RW(p_aux)->data);
+        TX_FREE(D_RW(p_aux)->occupied);
+  
+        D_RW(p_aux)->max_size = new_size;
+        D_RW(p_aux)->data = new_data;
+        D_RW(p_aux)->occupied = new_occupied;
+      }
+    } TX_END
+  }
+}
+
 //funcao inserir
 char insert (PMEMobjpool *pop, TOID(struct hash) p_aux, int dado){
 
@@ -120,6 +231,8 @@ char insert (PMEMobjpool *pop, TOID(struct hash) p_aux, int dado){
     printf("Hash cheio.\n");
     return false;
   }
+  
+  expand_hash(pop, p_aux);
 
   TX_BEGIN(pop) {
 
@@ -128,23 +241,23 @@ char insert (PMEMobjpool *pop, TOID(struct hash) p_aux, int dado){
     pmemobj_tx_add_range_direct(D_RW(D_RW(p_aux)->occupied), sizeof(char) * D_RO(p_aux)->max_size);
 
     int posicao = hash_function(dado, D_RO(p_aux)->max_size);
-
+    
     while (D_RO(D_RO(p_aux)->occupied)[posicao]){
       posicao++;
       posicao = posicao % D_RO(p_aux)->max_size;
     }
-
+    
     if (lifetime != DEFAULT) {
       if (lifetime == 0)
         exit(0);
       lifetime--;
     }
-
+  
     D_RW(D_RW(p_aux)->data)[posicao] = dado;
     D_RW(D_RW(p_aux)->occupied)[posicao] = true;
     D_RW(p_aux)->size++;
   } TX_END
-
+  
   return true;
 }
 
@@ -188,7 +301,7 @@ char remove_position (PMEMobjpool *pop, TOID(struct hash) p_aux, int posicao){
 
   posicao--;
 
-  if (! D_RO(D_RO(p_aux)->occupied)[posicao]){
+  if (!D_RO(D_RO(p_aux)->occupied)[posicao]){
     printf("Posição vazia.\n");
     return false;
   }
@@ -197,8 +310,9 @@ char remove_position (PMEMobjpool *pop, TOID(struct hash) p_aux, int posicao){
   TX_BEGIN(pop) {
     TX_ADD(p_aux);
     pmemobj_tx_add_range_direct(D_RW(D_RW(p_aux)->occupied), sizeof(char) * D_RO(p_aux)->max_size);
-    D_RW(D_RW(p_aux)->occupied)[posicao] = false;
 
+    D_RW(D_RW(p_aux)->occupied)[posicao] = false;
+    
     if (lifetime != DEFAULT) {
       if (lifetime == 0)
         exit(0);
@@ -208,6 +322,7 @@ char remove_position (PMEMobjpool *pop, TOID(struct hash) p_aux, int posicao){
     D_RW(p_aux)->size--;
   } TX_END
 
+  reduce_hash(pop, p_aux);
   return true;
 }
 
@@ -248,6 +363,17 @@ char remove_value (PMEMobjpool *pop, TOID(struct hash) p_aux, int dado){
     }
   } TX_END
 
+  // Realiza a verificação de se é necessário reduzir o hash para ficar na faixa desejada
+  while ((hash_rate(p_aux) < REDUCTION_RATE) && (D_RO(p_aux)->max_size > INITIAL_SIZE)) {
+
+    int last_size = D_RO(p_aux)->max_size;
+
+    reduce_hash(pop, p_aux);
+
+    if (D_RO(p_aux)->max_size == last_size)
+      break;
+  }
+
   return removed;
 }
 
@@ -265,6 +391,7 @@ char restore_position (PMEMobjpool *pop, TOID(struct hash) p_aux, int posicao){
     return false;
   }
   
+  expand_hash(pop, p_aux);
 
   TX_BEGIN(pop) {
     TX_ADD(p_aux);
@@ -287,13 +414,15 @@ void reset_hash(PMEMobjpool *pop, struct my_root * root) {
 
   TX_BEGIN (pop) {
 
+    TX_ADD_DIRECT(&root->p_hash);
+    
     TX_FREE(D_RW(root->p_hash)->occupied);
     TX_FREE(D_RW(root->p_hash)->data);
-
+    
     if (lifetime != DEFAULT) {
       if (lifetime == 0)
-        exit(0);
-      lifetime--;
+      exit(0);
+    lifetime--;
     }
   
     TX_FREE(root->p_hash);
