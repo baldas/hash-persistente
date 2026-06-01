@@ -32,5 +32,3 @@ clean:
 
 veryclean:
 	rm -f $(BINS) *.o
-
-
