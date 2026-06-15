@@ -21,6 +21,11 @@ execute: veryclean $(BINS)
 test: veryclean $(BINS)
 	./$(BINS) 10
 
+massive_test: veryclean hash_persistente.c
+	$(CC) hash_persistente.c -o $(BINS)  $(LDFLAGS) -DMASSIVE_TEST
+	$(CC) big_test.c -o big_test
+	./big_test 20
+
 hash_persistente.o: hash_persistente.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -31,4 +36,4 @@ clean:
 	rm -f *.o
 
 veryclean:
-	rm -f $(BINS) *.o
+	rm -f $(BINS) big_test *.o hash_pool*.obj

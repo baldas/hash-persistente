@@ -1,9 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <string.h>
+#include <ctype.h>
 
 #include <libpmemobj.h>
-
 
 #define EMPTY 0.0
 #define FULL 1.0
@@ -18,11 +19,15 @@
 #define EXPAND_RATE 0.75
 #define REDUCTION_RATE (EXPAND_RATE / SIZE_RATE)
 
-int lifetime = DEFAULT;
-
 #define LAYOUT_NAME "HASH"
-#define POOL_SIZE ((size_t) (10 * 1024 * 1024)) //10 MB
-#define POOL_NAME "hash_pool.obj"
+#define KB 1024ULL
+#define MB (1024ULL * KB)
+#define GB (1024ULL * MB)
+#define POOL_SIZE PMEMOBJ_MIN_POOL
+#define POOL_NAME "hash_pool"
+
+int lifetime = DEFAULT;
+char pool_name[BUFFER_SIZE] = "default";
 
 POBJ_LAYOUT_BEGIN(HASH);
   POBJ_LAYOUT_ROOT(HASH, struct my_root);
@@ -43,16 +48,16 @@ struct my_root {
 };
 
 // Imprime o hash na tela, para monitoramento do usuário
-void display(TOID(struct hash) p_aux) {
+void display(TOID(struct hash) p_aux, FILE* output_file) {
 
   // Percorre as linhas de 8 itens do hash
   for (int i = 0; i < (D_RO(p_aux)->max_size / INITIAL_SIZE); i++) {
 
     // Caso seja a primeira linha, imprime o cabeçalho do hash
     if (i != 0)
-      printf("       ");
+      fprintf(output_file, "       ");
     else
-      printf("\n HASH =");
+      fprintf(output_file, "\n HASH =");
 
     // Percorre os itens do hash daquela linha
     for (int j = 0; j < INITIAL_SIZE; j++) {
@@ -62,15 +67,15 @@ void display(TOID(struct hash) p_aux) {
 
         // Caso não esteja ocupado, usa a flag de remoção na resposta
         if (D_RO(D_RO(p_aux)->occupied)[i*INITIAL_SIZE+j])
-            printf(" [%d] ", D_RO(D_RO(p_aux)->data)[i*INITIAL_SIZE+j]);
+            fprintf(output_file, " [%d] ", D_RO(D_RO(p_aux)->data)[i*INITIAL_SIZE+j]);
         else
-            printf(" [!%d] ", D_RO(D_RO(p_aux)->data)[i*INITIAL_SIZE+j]);
+            fprintf(output_file, " [!%d] ", D_RO(D_RO(p_aux)->data)[i*INITIAL_SIZE+j]);
 
       } else
-        printf(" [*] ");
+        fprintf(output_file, " [*] ");
     }
 
-    printf(" (%d)\n", (i+1)*INITIAL_SIZE);
+    fprintf(output_file, " (%d)\n", (i+1)*INITIAL_SIZE);
   }
 }
 
@@ -434,18 +439,42 @@ void reset_hash(PMEMobjpool *pop, struct my_root * root) {
 }
 
 int main(int argc, char *argv[]) {
-/****
- * POOL MANEGEMENT CODE
- */
 
-  if (argc > 1) {
-    lifetime = atoi(argv[1]);
+  #ifdef MASSIVE_TEST
+
+    #ifdef _WIN32
+      const char *null_device = "NUL";
+    #else
+      const char *null_device = "/dev/null";
+    #endif
+
+    if (freopen(null_device, "w", stdout) == NULL) {
+      perror("Erro ao redirecionar stdout");
+      return 1;
+    }
+  #endif
+  
+  switch (argc) {
+    case 1: break;
+    case 2: lifetime = atoi(argv[1]); break;
+    case 3:
+      lifetime = atoi(argv[1]);
+
+      strcpy(pool_name, POOL_NAME);
+      if (strlen(argv[2]) > (BUFFER_SIZE - strlen(pool_name) - 5))
+        argv[2][BUFFER_SIZE - strlen(pool_name) - 5] = '\0';
+
+      strcat(pool_name, argv[2]);
+      break;
+    default:
+      perror("Try to use less arguments.\n");
+      return 1;
   }
 
-  PMEMobjpool *pop = pmemobj_create(POOL_NAME, LAYOUT_NAME, POOL_SIZE, 0666);
+  PMEMobjpool *pop = pmemobj_create(strcat(pool_name, ".obj"), LAYOUT_NAME, POOL_SIZE, 0666);
   if (pop == NULL) {
     /* Open the pool and return a "pool object pointer" */
-      pop = pmemobj_open(POOL_NAME, LAYOUT_NAME);
+      pop = pmemobj_open(pool_name, LAYOUT_NAME);
       if (pop == NULL) {
         perror("pmemobj_open\n");
         return 1;
@@ -462,12 +491,11 @@ int main(int argc, char *argv[]) {
   int option, data;
   char buffer[BUFFER_SIZE];
 
-    // Menu de interação
   while (true) {
-    display(root->p_hash);
+    display(root->p_hash, stdout);
 
     if (lifetime <0) {
-      printf("\nEnter your choice:\n1. Insert data\n2. Remove by position\n3. Remove by value\n4. Search by value\n5. Restore by position\n6. Reset Hash\n7. Exit\n >> ");
+      printf("\nEnter your choice:\n1. Insert data\n2. Remove by position\n3. Remove by value\n4. Search by value\n5. Restore by position\n6. Export Hash\n7. Reset Hash\n8. Exit\n >> ");
     } else {
       printf("\nEnter your choice: (");
       switch (lifetime) {
@@ -477,7 +505,7 @@ int main(int argc, char *argv[]) {
         case 3: printf("█ █ █"); break;
         default: printf("%dx █",lifetime);
       }
-      printf(")\n1. Insert data\n2. Remove by position\n3. Remove by value\n4. Search by value\n5. Restore by position\n6. Reset Hash\n7. Exit\n >> ");
+      printf(")\n1. Insert data\n2. Remove by position\n3. Remove by value\n4. Search by value\n5. Restore by position\n6. Export Hash\n7. Reset Hash\n8. Exit\n >> ");
     }
     fgets(buffer, BUFFER_SIZE-1, stdin);
     option = atoi(buffer);
@@ -544,13 +572,30 @@ int main(int argc, char *argv[]) {
           printf("Position not restored.\n");
         }
         break;
+        
+      case 6: // Caso de exportação da hash
+        printf("Enter file name to be added: ");
+        fgets(buffer, BUFFER_SIZE-1, stdin);
 
-      case 6: // Caso de reset da hash
+        buffer[strcspn(buffer, "\n")] = '\0';
+        buffer[BUFFER_SIZE-5] = '\0';
+
+        if (isalpha(buffer[0])) {
+          FILE* output_file = fopen(strcat(buffer,".txt"),"a+");
+          display(root->p_hash, output_file);
+          fclose(output_file);
+          printf("Hash exported!\n");
+        } else {
+          printf("Failed to export Hash!\n");
+        }
+        break;
+
+      case 7: // Caso de reset da hash
         reset_hash(pop, root);
         printf("Hash reseted!\n");
         break;
 
-      case 7: // Caso de saída do programa
+      case 8: // Caso de saída do programa
         pmemobj_close(pop);
         exit(0);
       
